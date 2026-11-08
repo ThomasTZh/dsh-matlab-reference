@@ -29,16 +29,24 @@ Reading starts at offset 0 and returns the first sections; a result with a `next
 |---|---|
 | `catalogRoot` | Required. The toolkit's `skills-catalog` directory. |
 
-## js-yaml
+## Harness package and YAML
 
-Front matter is parsed with the `js-yaml` copy bundled with the harness. The module locates that package from `DSH_PACKAGE_JSON` when set, otherwise from the launcher path (`dsh` to `lib/bin.js` to `package.json`). A moved harness needs the variable, and the test suite fails without it.
+The plugin needs two things from the harness install: `js-yaml` for skill front matter, and `@deepseek-ai/dsh-tools` for the tool definitions. It accepts the first candidate package that actually owns `@deepseek-ai/dsh-tools`:
+
+1. `DSH_PACKAGE_JSON`, when set.
+2. The package that owns the running script (`process.argv[1]`), which covers a launch through the harness's own `lib/bin.js`.
+3. The `dsh` executable on `PATH`, resolved to its real path.
+
+A candidate whose `package.json` merely exists is not accepted. Launchers and plugin managers start the harness from their own scripts, so `process.argv[1]` can point at a wrapper package with no harness packages behind it.
+
+`js-yaml` is loaded from the accepted package. When it is unreachable, a built-in parser reads the small front-matter block (`name`, `description`, `license`), so a missing YAML library degrades parsing instead of preventing the plugin from loading. When no candidate owns `@deepseek-ai/dsh-tools`, the plugin still imports, and the first tool call fails with the package paths it tried.
 
 ## Files
 
 | Path | Contents |
 |---|---|
 | [`matlab-reference.mjs`](matlab-reference.mjs) | The plugin: catalogue index, ranking, bounded page reads |
-| [`matlab-reference.test.mjs`](matlab-reference.test.mjs) | Two tests over a synthetic catalogue, plus an optional check against an installed toolkit |
+| [`matlab-reference.test.mjs`](matlab-reference.test.mjs) | Two tests over a synthetic catalogue, two wrapper-launch regressions, plus an optional check against an installed toolkit |
 
 ## Install
 
@@ -64,9 +72,10 @@ No profile dependency is needed, because the plugin is mounted by path rather th
 
 | Check | Command | Result |
 |---|---|---|
-| Unit tests | `DSH_PACKAGE_JSON=<harness package.json> node --test matlab-reference.test.mjs` | pass, 2 tests; the toolkit search test is skipped when no toolkit is installed |
+| Unit tests | `node --test matlab-reference.test.mjs` | pass, 4 tests; the toolkit search test is skipped when no toolkit is installed |
 | Module parses | `node --check matlab-reference.mjs` | pass |
-| Missing harness variable | `node --test matlab-reference.test.mjs` without the variable | fails to resolve `js-yaml` from a launcher path this repository does not have; documented, not hidden |
+| Wrapper launch | child process whose `argv[1]` sits inside a wrapper package, with `DSH_PACKAGE_JSON` unset | pass: resolves the harness from the `dsh` on `PATH` and registers both tools |
+| Unreachable harness | the same layout with an empty `PATH` | pass: the import succeeds and `apply()` reports the package it could not find |
 | Live search | mounted in the MATLAB preset on the machine it was written for | pass: search returns ranked skills and a page read follows `next_offset` |
 
 **Not tested:** a toolkit revision other than the one installed on the recording machine.

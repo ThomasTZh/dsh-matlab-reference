@@ -1,28 +1,97 @@
 import {readdir, readFile, realpath, stat} from 'node:fs/promises';
-import {resolve, dirname, relative, isAbsolute, join} from 'node:path';
+import {resolve, dirname, relative, isAbsolute, join, delimiter} from 'node:path';
 import {createRequire} from 'node:module';
 import {pathToFileURL} from 'node:url';
-import {existsSync} from 'node:fs';
+import {existsSync, realpathSync} from 'node:fs';
 
 export const name='matlab-reference';
 export const inject=['tools'];
 const PAGE_BYTES=6000;
 const MAX_FILE_BYTES=512*1024;
-/**
- * Locate the running DeepSeek Harness package so its bundled js-yaml can be
- * loaded. `DSH_PACKAGE_JSON` overrides; otherwise derive it from the launcher
- * path (`dsh` -> `<dsh>/lib/bin.js` -> `<dsh>/package.json`).
- */
-function dshPackageJson() {
-  const candidates = [process.env.DSH_PACKAGE_JSON];
-  if (process.argv[1]) candidates.push(resolve(dirname(process.argv[1]), '..', 'package.json'));
-  for (const candidate of candidates) {
-    if (candidate && existsSync(candidate) && candidate.endsWith('package.json')) return candidate;
-  }
-  throw new Error('matlab-reference: set DSH_PACKAGE_JSON to the DeepSeek Harness package.json');
+/** Real path of an existing file, or undefined. */
+function realFile(path) {
+  try {return path!==undefined&&existsSync(path)?realpathSync(path):undefined;} catch {return undefined;}
 }
-const require=createRequire(dshPackageJson());
-const {load:loadYaml}=require('js-yaml');
+/** Real path of one executable found on PATH, or undefined. */
+function launcherPath(name) {
+  for(const dir of (process.env.PATH??'').split(delimiter)) {
+    if(!dir) continue;
+    const found=realFile(resolve(dir,name));
+    if(found!==undefined) return found;
+  }
+}
+/**
+ * Candidate DeepSeek Harness package.json files, in priority order: the
+ * `DSH_PACKAGE_JSON` override, the script this process runs (a launcher started
+ * through `<dsh>/lib/bin.js`), and the `dsh` executable on PATH. Wrappers and
+ * plugin managers start the server from another script, so `process.argv[1]`
+ * alone does not identify the harness package.
+ */
+function packageJsonCandidates() {
+  const candidates=[];
+  const add=path=>{
+    const real=realFile(path);
+    if(real!==undefined&&real.endsWith('package.json')&&!candidates.includes(real)) candidates.push(real);
+  };
+  add(process.env.DSH_PACKAGE_JSON);
+  if(process.argv[1]) add(resolve(dirname(process.argv[1]),'..','package.json'));
+  const launcher=launcherPath('dsh');
+  if(launcher!==undefined) add(resolve(dirname(launcher),'..','package.json'));
+  return candidates;
+}
+/**
+ * `require` bound to the first harness package that actually owns
+ * `@deepseek-ai/dsh-tools`. A candidate whose package.json merely exists is not
+ * enough: a wrapper's own package.json can exist while the harness packages stay
+ * unreachable from it, which is what made this plugin fail to start.
+ */
+let harnessRequire;
+function dshRequire() {
+  if(harnessRequire!==undefined) return harnessRequire;
+  const tried=[];
+  for(const candidate of packageJsonCandidates()) {
+    const candidateRequire=createRequire(candidate);
+    try {
+      candidateRequire.resolve('@deepseek-ai/dsh-tools');
+      harnessRequire=candidateRequire;
+      return harnessRequire;
+    } catch {tried.push(candidate);}
+  }
+  try {
+    const local=createRequire(import.meta.url);
+    local.resolve('@deepseek-ai/dsh-tools');
+    harnessRequire=local;
+    return harnessRequire;
+  } catch {}
+  throw new Error('matlab-reference: cannot find the DeepSeek Harness package that owns @deepseek-ai/dsh-tools; set DSH_PACKAGE_JSON to its package.json'+(tried.length>0?` (tried ${tried.join(', ')})`:''));
+}
+/** Minimal front-matter parser used only when the harness's js-yaml is unreachable. */
+function parseFrontMatter(source) {
+  const data={};
+  const lines=String(source).split(/\r?\n/);
+  for(let index=0;index<lines.length;index+=1) {
+    const match=/^([A-Za-z0-9_-]+):(.*)$/.exec(lines[index]);
+    if(match===null) continue;
+    const key=match[1],rest=match[2].trim();
+    if(rest===''||/^[>|][+-]?$/.test(rest)) {
+      const parts=[];
+      while(index+1<lines.length&&(/^\s+\S/.test(lines[index+1])||lines[index+1].trim()==='')) parts.push(lines[index+=1].trim());
+      while(parts.length>0&&parts[parts.length-1]==='') parts.pop();
+      data[key]=rest.startsWith('|')?parts.join('\n'):parts.join(' ').trim();
+      continue;
+    }
+    data[key]=rest.replace(/^(['"])([\s\S]*)\1$/,'$2');
+  }
+  return data;
+}
+let yamlLoader;
+/** Parse YAML with the harness's bundled js-yaml, falling back to the local parser. */
+function loadYaml(source) {
+  if(yamlLoader===undefined) {
+    try {yamlLoader=dshRequire()('js-yaml').load;} catch {yamlLoader=null;}
+  }
+  return yamlLoader===null?parseFrontMatter(source):yamlLoader(source);
+}
 const ALIASES={ecg:'signal filter peak',eeg:'signal filter spectrum wavelet',emg:'signal filter features',
   denoise:'filter noise',denoising:'filter noise',psd:'signal spectrum spectral',fft:'signal spectrum spectral',
   resampling:'signal resample filter',segmentation:'image mask',registration:'image registration',
@@ -160,7 +229,7 @@ export class SkillIndex {
 }
 
 export async function apply(ctx,config) {
-  const {defineTool}=await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-tools')).href);
+  const {defineTool}=await import(pathToFileURL(dshRequire().resolve('@deepseek-ai/dsh-tools')).href);
   const index=new SkillIndex(resolveRoot(config));await index.refresh();
   const output={schema:{type:'string'},render:(_args,text)=>[{type:'text',text}]};
   ctx.tools.register(defineTool({name:'search_matlab_skills',

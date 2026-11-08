@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
 import {mkdtemp, mkdir, writeFile, symlink, rm} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {delimiter, join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {SkillIndex,apply} from './matlab-reference.mjs';
 
 test('search ranks domain references and reads bounded, complete pages and resources',async()=>{
@@ -62,4 +64,74 @@ test('installed toolkit is searchable without mounting its full catalogue',{skip
     const result=index.search(query,4).results.find(r=>r.name===expected);
     assert.ok(result,query);assert.ok(result.description.length>15);
   }
+});
+
+/** First `dsh` executable on PATH, if this machine has one. */
+function whichDsh() {
+  for(const dir of (process.env.PATH??'').split(delimiter)) {
+    if(!dir) continue;
+    const candidate=join(dir,'dsh');
+    if(existsSync(candidate)) return candidate;
+  }
+}
+
+/** Run one script in a child node with a controlled environment. */
+function runChild(script,work,env) {
+  return spawnSync(process.execPath,[script],{cwd:work,encoding:'utf8',env:{...process.env,...env},timeout:30000});
+}
+
+/** A tiny catalogue the child can index without the installed toolkit. */
+async function fixture(root) {
+  await mkdir(join(root,'domain','matlab-filter'),{recursive:true});
+  await writeFile(join(root,'domain','matlab-filter','SKILL.md'),'---\nname: matlab-filter\ndescription: Digital filter for ECG\n---\n## Design\nUse Hz.\n');
+}
+
+/**
+ * Lay out a wrapper launch: a package.json that exists but owns no harness
+ * packages, with the running script two levels below it. That is the shape a
+ * plugin manager leaves `process.argv[1]` in.
+ */
+async function wrapperLayout(root) {
+  const wrapper=join(root,'node_modules','wrapper');
+  await mkdir(join(wrapper,'lib'),{recursive:true});
+  await writeFile(join(wrapper,'package.json'),JSON.stringify({name:'wrapper',version:'0.0.0'}));
+  return join(wrapper,'lib');
+}
+
+const PLUGIN=fileURLToPath(new URL('matlab-reference.mjs',import.meta.url));
+
+test('a wrapper launch finds the harness through the dsh on PATH',{skip:whichDsh()===undefined?'no dsh on PATH':false},async()=>{
+  const work=await mkdtemp(join(tmpdir(),'matlab-reference-wrapper-'));
+  try {
+    const lib=await wrapperLayout(work);
+    await fixture(join(work,'catalog'));
+    const script=join(lib,'run.mjs');
+    await writeFile(script,`const {apply}=await import(process.env.PLUGIN);const tools=[];
+await apply({tools:{register:tool=>tools.push(tool)}},{catalogRoot:process.env.CATALOG});
+console.log(JSON.stringify(tools.map(tool=>tool.name)));`);
+    const env={PLUGIN:PLUGIN,CATALOG:join(work,'catalog'),DSH_PACKAGE_JSON:undefined};
+    const result=runChild(script,work,env);
+    assert.equal(result.status,0,result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout),['search_matlab_skills','read_matlab_skill']);
+  } finally {await rm(work,{recursive:true,force:true});}
+});
+
+test('a wrapper package.json without a reachable harness reports the cause instead of crashing at import',async()=>{
+  const work=await mkdtemp(join(tmpdir(),'matlab-reference-unresolved-'));
+  try {
+    const lib=await wrapperLayout(work);
+    await fixture(join(work,'catalog'));
+    const loader=join(lib,'import.mjs');
+    await writeFile(loader,`await import(process.env.PLUGIN);console.log('imported');`);
+    const applyScript=join(lib,'apply.mjs');
+    await writeFile(applyScript,`const {apply}=await import(process.env.PLUGIN);
+await apply({tools:{register(){}}},{catalogRoot:process.env.CATALOG});`);
+    const env={PLUGIN:PLUGIN,CATALOG:join(work,'catalog'),DSH_PACKAGE_JSON:undefined,PATH:''};
+    const imported=runChild(loader,work,env);
+    assert.equal(imported.status,0,imported.stderr);
+    assert.match(imported.stdout,/imported/);
+    const applied=runChild(applyScript,work,env);
+    assert.notEqual(applied.status,0);
+    assert.match(applied.stderr,/cannot find the DeepSeek Harness package that owns @deepseek-ai\/dsh-tools/);
+  } finally {await rm(work,{recursive:true,force:true});}
 });

@@ -7,7 +7,7 @@ No upstream code, text, or dataset is included in this repository. This file rec
 | Component | Role here | Project | Licence | Distribution |
 |---|---|---|---|---|
 | DeepSeek Harness | Host: the tool API, the agent session, and the bundled `js-yaml` the plugin resolves at runtime | [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) | MIT | installed separately, not vendored |
-| `js-yaml` | YAML front matter parsing, resolved from the harness install | [nodeca/js-yaml](https://github.com/nodeca/js-yaml) | MIT | bundled with the harness, not vendored here |
+| `js-yaml` | YAML front matter parsing, resolved from the harness install; a built-in parser covers the case where it is unreachable | [nodeca/js-yaml](https://github.com/nodeca/js-yaml) | MIT | bundled with the harness, not vendored here |
 | MATLAB Agentic Toolkit | The catalogue read at call time: skill files, descriptions, and resources | [matlab/matlab-agentic-toolkit](https://github.com/matlab/matlab-agentic-toolkit) | MathWorks BSD-3-Clause, use restricted to MathWorks products | installed separately, not vendored or redistributed |
 | Node.js | Runtime for the plugin and its tests | <https://nodejs.org> | MIT | installed separately |
 
